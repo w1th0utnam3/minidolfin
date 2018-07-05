@@ -155,22 +155,29 @@ def assemble_vectorized(petsc_tensor, dofmap, form, **kwargs):
     fiat_elements = map(tsfc.fiatinterface.create_element, elements)
     element_dims = tuple(fe.space_dimension() for fe in fiat_elements)
 
+    # Aligned storage for element tensor
     _A_raw = empty_aligned(8 * numpy.prod(element_dims) * vec_width, align=32)
     _A = _A_raw.view(dtype=numpy.float64).reshape((*element_dims, vec_width))
 
+    # Aligned storage for transposed element tensor
     _A_t_raw = empty_aligned(8 * numpy.prod(element_dims) * vec_width, align=32)
     _A_t = _A_t_raw.view(dtype=numpy.float64).reshape((vec_width, *element_dims))
 
     # Prepare coordinates temporary
     num_vertices_per_cell = cells.shape[1]
     gdim = vertices.shape[1]
+
+    # Aligned storage for coordinates array
     _coords_raw = empty_aligned(8 * numpy.prod((num_vertices_per_cell, gdim, vec_width)), align=32)
     _coords = _coords_raw.view(dtype=numpy.float64).reshape((num_vertices_per_cell, gdim, vec_width))
 
+    # Aligned storage for transposed coordinates array
     _coords_t_raw = empty_aligned(8 * numpy.prod((num_vertices_per_cell, gdim, vec_width)), align=32)
     _coords_t = _coords_t_raw.view(dtype=numpy.float64).reshape((vec_width, num_vertices_per_cell, gdim))
 
-    unstride_A = (len(element_dims), *tuple([x for x in range(len(element_dims))]))
+    # Tuple that can be used to transpose cross-element dimension from inner-most to outer-most
+    identity_transpose = tuple(range(len(element_dims) + 1))
+    unstride_A = (identity_transpose[-1], *identity_transpose[:-1])
 
     @numba.jit(nopython=True)
     def _assemble(assembly_kernel, cells, vertices, cell_dofs, mat, _coords, _A, _coords_t, _A_t):
