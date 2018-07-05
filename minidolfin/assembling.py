@@ -34,6 +34,9 @@ def ffc_compile_wrapper(form, extra_parameters = None):
     """Compiles form with FFC and returns source code."""
 
     parameters = ffc.parameters.default_parameters()
+    parameters["cross_element_width"] = cross_element_width
+    parameters["enable_cross_element_gcc_ext"] = gcc_vec_ext
+
     parameters.update({} if extra_parameters is None else extra_parameters)
 
     # Call FFC
@@ -55,13 +58,21 @@ def ffc_compile_wrapper(form, extra_parameters = None):
 
     tabulate_tensor_signature = "void form_cell_integral_otherwise (double* restrict A, const double *restrict coordinate_dofs)"
 
-    return "\n".join([
-        "#include <math.h>\n",
-        "#include <stdalign.h>\n",
+    preamble = [
+        "#include <math.h>",
+        "#include <stdalign.h>\n"
+    ]
+
+    if gcc_vec_ext:
+        tabulate_tensor_signature = tabulate_tensor_signature.replace("double", "double4")
+        preamble.append("typedef double double4 __attribute__ ((vector_size (32)));\n")
+
+    code = "\n".join(preamble + [
         tabulate_tensor_signature,
         tabulate_tensor_body
     ])
 
+    return code
 
 def compile_form(a, form_compiler=None, form_compiler_parameters=None):
     """Compiles form with the specified compiler and returns a ctypes function ptr."""
@@ -70,8 +81,8 @@ def compile_form(a, form_compiler=None, form_compiler_parameters=None):
     form_compiler = "tsfc" if form_compiler is None else form_compiler
 
     form_compilers = {
-        "ffc": lambda form: ffc_compile_wrapper(form, form_compiler_parameters),
-        "tsfc": lambda form: tsfc_compile_wrapper(form, form_compiler_parameters)
+        "ffc": lambda form: ffc_compile_wrapper(form, form_compiler_parameters, **kwargs),
+        "tsfc": lambda form: tsfc_compile_wrapper(form, form_compiler_parameters, **kwargs)
     }
 
     run_form_compiler = form_compilers[form_compiler]
@@ -89,7 +100,8 @@ def compile_form(a, form_compiler=None, form_compiler_parameters=None):
     params = {
          'build': {
              'cxx': 'cc',
-             'cxxflags': ('-Wall', '-shared', '-fPIC', '-std=c11'),
+            'cxxflags': (
+                '-O2', '-Wall', '-shared', '-fPIC', '-std=c11', '-march=skylake', '-mtune=skylake', '-ftree-vectorize', '-funroll-loops'),
          },
          'cache': {'src_postfix': '.c'},
     }
@@ -108,16 +120,28 @@ def compile_form(a, form_compiler=None, form_compiler_parameters=None):
 # petsc4py.PETSc.Mat.setValues() with numba.jit(nopython=True)
 petsc = ctypes.CDLL('libpetsc.so')
 MatSetValues = petsc.MatSetValues
-MatSetValues.argtypes = 7*(ctypes.c_void_p,)
+MatSetValues.argtypes = 7 * (ctypes.c_void_p,)
 ADD_VALUES = PETSc.InsertMode.ADD_VALUES
 del petsc
 
 
-def assemble(petsc_tensor, dofmap, form, form_compiler=None, form_compiler_parameters=None):
+def empty_aligned(n, align):
+    # Get n bytes of memory wih alignment align.
+    a = numpy.empty(n + (align - 1), dtype=numpy.uint8)
+    data_align = a.ctypes.data % align
+    offset = 0 if data_align == 0 else (align - data_align)
+    return a[offset: offset + n]
+
+
+def assemble_vectorized(petsc_tensor, dofmap, form, **kwargs):
     assert len(form.arguments()) == 2, "Now only bilinear forms"
 
+    vec_width = 4
     # JIT compile UFL form into ctypes function
-    assembly_kernel = compile_form(form, form_compiler, form_compiler_parameters)
+    assembly_kernel = compile_form(form,
+                                   form_compiler="ffc",
+                                   cross_element_width=vec_width,
+                                   gcc_vec_ext=True)
 
     # Fetch data
     tdim = dofmap.mesh.reference_cell.get_dimension()
@@ -130,12 +154,83 @@ def assemble(petsc_tensor, dofmap, form, form_compiler=None, form_compiler_param
     elements = tuple(arg.ufl_element() for arg in form.arguments())
     fiat_elements = map(tsfc.fiatinterface.create_element, elements)
     element_dims = tuple(fe.space_dimension() for fe in fiat_elements)
-    _A = numpy.ndarray(element_dims)
+
+    _A_raw = empty_aligned(8 * numpy.prod(element_dims) * vec_width, align=32)
+    _A = _A_raw.view(dtype=numpy.float64).reshape((*element_dims, vec_width))
+
+    _A_t_raw = empty_aligned(8 * numpy.prod(element_dims) * vec_width, align=32)
+    _A_t = _A_t_raw.view(dtype=numpy.float64).reshape((vec_width, *element_dims))
 
     # Prepare coordinates temporary
     num_vertices_per_cell = cells.shape[1]
     gdim = vertices.shape[1]
-    _coords = numpy.ndarray((num_vertices_per_cell, gdim), dtype=numpy.double)
+    _coords_raw = empty_aligned(8 * numpy.prod((num_vertices_per_cell, gdim, vec_width)), align=32)
+    _coords = _coords_raw.view(dtype=numpy.float64).reshape((num_vertices_per_cell, gdim, vec_width))
+
+    _coords_t_raw = empty_aligned(8 * numpy.prod((num_vertices_per_cell, gdim, vec_width)), align=32)
+    _coords_t = _coords_t_raw.view(dtype=numpy.float64).reshape((vec_width, num_vertices_per_cell, gdim))
+
+    unstride_A = (len(element_dims), *tuple([x for x in range(len(element_dims))]))
+
+    @numba.jit(nopython=True)
+    def _assemble(assembly_kernel, cells, vertices, cell_dofs, mat, _coords, _A, _coords_t, _A_t):
+        A_ptr = _A.ctypes.data
+        coords_ptr = _coords.ctypes.data
+        nrows = ncols = cell_dofs.shape[1]
+
+        # Make sure that number of cells is dividable by vectorization width
+        assert cells.shape[0] % vec_width == 0, "Number of cells not dividable by vectorization width"
+
+        # Loop over cells
+        for i in range(0, cells.shape[0], vec_width):
+            # Collect vertex coordinates for each element
+            for j in range(vec_width):
+                _coords_t[j, :] = vertices[cells[i + j]]
+
+            # Make coordinates strided
+            _coords[:] = numpy.transpose(_coords_t, (1, 2, 0))
+
+            # Assemble cell tensor
+            assembly_kernel(A_ptr, coords_ptr)
+
+            # "Unstride" element matrix
+            _A_t[:] = numpy.transpose(_A, unstride_A)
+
+            # Add to global tensor
+            for j in range(vec_width):
+                rows = cols = cell_dofs[i + j].ctypes.data
+                ierr = MatSetValues(mat, nrows, rows, ncols, cols, _A_t[j, :].ctypes.data, ADD_VALUES)
+                assert ierr == 0, "MatSetValues error!"
+
+    # Call jitted hot loop
+    _assemble(assembly_kernel, cells, vertices, cell_dofs, mat, _coords, _A, _coords_t, _A_t)
+
+    petsc_tensor.assemble()
+
+
+def assemble(petsc_tensor, dofmap, form, **kwargs):
+    assert len(form.arguments()) == 2, "Now only bilinear forms"
+
+    # JIT compile UFL form into ctypes function
+    assembly_kernel = compile_form(form, **kwargs)
+
+    # Fetch data
+    tdim = dofmap.mesh.reference_cell.get_dimension()
+    cells = dofmap.mesh.get_connectivity(tdim, 0)
+    vertices = dofmap.mesh.vertices
+    cell_dofs = dofmap.cell_dofs
+    mat = petsc_tensor.handle
+
+    # Prepare cell tensor temporary
+    elements = tuple(arg.ufl_element() for arg in form.arguments())
+    fiat_elements = map(tsfc.fiatinterface.create_element, elements)
+    element_dims = tuple(fe.space_dimension() for fe in fiat_elements)
+    _A = numpy.zeros(element_dims, dtype=numpy.double)
+
+    # Prepare coordinates temporary
+    num_vertices_per_cell = cells.shape[1]
+    gdim = vertices.shape[1]
+    _coords = numpy.zeros((num_vertices_per_cell, gdim), dtype=numpy.double)
 
     @numba.jit(nopython=True)
     def _assemble(assembly_kernel, cells, vertices, cell_dofs, mat, _coords, _A):
