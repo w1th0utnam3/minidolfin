@@ -126,12 +126,31 @@ ADD_VALUES = PETSc.InsertMode.ADD_VALUES
 del petsc
 
 
-def empty_aligned(n, align):
-    # Get n bytes of memory wih alignment align.
+def empty_aligned(shape, dtype, align):
+    """
+    Allocate numpy array with a certain memory alignment.
+
+    :param shape: Shape of the requested array.
+    :param dtype: Data-type of the requested array.
+    :param align: Memory alignment requirement of the array in bytes.
+    :return: Array with the specified properties.
+    """
+
+    # Calculate the required amount of bytes for the array
+    n = numpy.dtype(dtype).itemsize * numpy.prod(shape)
+
+    # Allocate array with possible offset for alignment
     a = numpy.empty(n + (align - 1), dtype=numpy.uint8)
     data_align = a.ctypes.data % align
     offset = 0 if data_align == 0 else (align - data_align)
-    return a[offset: offset + n]
+    a_aligned = a[offset: offset + n]
+
+    # View with requested data-type
+    a_casted = a_aligned.view(dtype=dtype)
+    # Assign new shape (guarantees no copy)
+    a_casted.shape = shape
+
+    return a_casted
 
 
 def assemble_vectorized(petsc_tensor, dofmap, form, **kwargs):
@@ -156,25 +175,19 @@ def assemble_vectorized(petsc_tensor, dofmap, form, **kwargs):
     fiat_elements = map(tsfc.fiatinterface.create_element, elements)
     element_dims = tuple(fe.space_dimension() for fe in fiat_elements)
 
-    # Aligned storage for element tensor
-    _A_raw = empty_aligned(8 * numpy.prod(element_dims) * vec_width, align=32)
-    _A = _A_raw.view(dtype=numpy.float64).reshape((*element_dims, vec_width))
-
+    # Aligned storage for strided element tensor
+    _A = empty_aligned((*element_dims, vec_width), dtype=numpy.float64, align=32)
     # Aligned storage for transposed element tensor
-    _A_t_raw = empty_aligned(8 * numpy.prod(element_dims) * vec_width, align=32)
-    _A_t = _A_t_raw.view(dtype=numpy.float64).reshape((vec_width, *element_dims))
+    _A_t = empty_aligned((vec_width, *element_dims), dtype=numpy.float64, align=32)
 
     # Prepare coordinates temporary
     num_vertices_per_cell = cells.shape[1]
     gdim = vertices.shape[1]
 
-    # Aligned storage for coordinates array
-    _coords_raw = empty_aligned(8 * numpy.prod((num_vertices_per_cell, gdim, vec_width)), align=32)
-    _coords = _coords_raw.view(dtype=numpy.float64).reshape((num_vertices_per_cell, gdim, vec_width))
-
+    # Aligned storage for strided coordinates array
+    _coords = empty_aligned((num_vertices_per_cell, gdim, vec_width), dtype=numpy.float64, align=32)
     # Aligned storage for transposed coordinates array
-    _coords_t_raw = empty_aligned(8 * numpy.prod((num_vertices_per_cell, gdim, vec_width)), align=32)
-    _coords_t = _coords_t_raw.view(dtype=numpy.float64).reshape((vec_width, num_vertices_per_cell, gdim))
+    _coords_t = empty_aligned((vec_width, num_vertices_per_cell, gdim), dtype=numpy.float64, align=32)
 
     # Tuple that can be used to transpose cross-element dimension from inner-most to outer-most
     identity_transpose = tuple(range(len(element_dims) + 1))
