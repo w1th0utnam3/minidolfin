@@ -101,7 +101,8 @@ def compile_form(a, form_compiler=None, form_compiler_parameters=None):
          'build': {
              'cxx': 'cc',
             'cxxflags': (
-                '-O2', '-Wall', '-shared', '-fPIC', '-std=c11', '-march=skylake', '-mtune=skylake', '-ftree-vectorize', '-funroll-loops'),
+                '-O2', '-Wall', '-shared', '-fPIC', '-std=c11',
+                '-march=skylake', '-mtune=skylake', '-ftree-vectorize', '-funroll-loops'),
          },
          'cache': {'src_postfix': '.c'},
     }
