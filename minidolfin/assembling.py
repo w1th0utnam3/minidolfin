@@ -136,6 +136,9 @@ def empty_aligned(shape, dtype, align):
     :return: Array with the specified properties.
     """
 
+    # Aligned memory is required for AVX2 but not supported natively by NumPy
+    # See: https://github.com/numpy/numpy/issues/5312
+
     # Calculate the required amount of bytes for the array
     n = numpy.dtype(dtype).itemsize * numpy.prod(shape)
 
@@ -199,8 +202,8 @@ def assemble_vectorized(petsc_tensor, dofmap, form, **kwargs):
         coords_ptr = _coords.ctypes.data
         nrows = ncols = cell_dofs.shape[1]
 
-        # Make sure that number of cells is dividable by vectorization width
-        assert cells.shape[0] % vec_width == 0, "Number of cells not dividable by vectorization width"
+        # Currently no residual loop implemented
+        assert cells.shape[0] % vec_width == 0, "Number of cells not divisible by vectorization width"
 
         # Loop over cells
         for i in range(0, cells.shape[0], vec_width):
