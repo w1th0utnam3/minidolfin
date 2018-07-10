@@ -10,9 +10,10 @@ from petsc4py import PETSc
 
 import ctypes
 import hashlib
+from copy import copy
 
 
-def tsfc_compile_wrapper(form, extra_parameters=None, **kwargs):
+def tsfc_compile_wrapper(form, extra_parameters=None):
     """Compiles form with TSFC and returns source code."""
 
     parameters = {'mode': 'spectral'}
@@ -31,14 +32,13 @@ def tsfc_compile_wrapper(form, extra_parameters=None, **kwargs):
     return code
 
 
-def ffc_compile_wrapper(form, extra_parameters=None, cross_element_width=0, gcc_vec_ext=False, **kwargs):
+def ffc_compile_wrapper(form, extra_parameters=None):
     """Compiles form with FFC and returns source code."""
 
     parameters = ffc.parameters.default_parameters()
-    parameters["cross_element_width"] = cross_element_width
-    parameters["enable_cross_element_gcc_ext"] = gcc_vec_ext
-
     parameters.update({} if extra_parameters is None else extra_parameters)
+
+    use_gcc_vec_ext = parameters.get("enable_cross_element_gcc_ext", False)
 
     # Call FFC
     code_h, code_c = ffc.compiler.compile_form(form, parameters=parameters)
@@ -64,7 +64,7 @@ def ffc_compile_wrapper(form, extra_parameters=None, cross_element_width=0, gcc_
         "#include <stdalign.h>\n"
     ]
 
-    if gcc_vec_ext:
+    if use_gcc_vec_ext:
         tabulate_tensor_signature = tabulate_tensor_signature.replace("double", "double4")
         preamble.append("typedef double double4 __attribute__ ((vector_size (32)));\n")
 
@@ -76,15 +76,15 @@ def ffc_compile_wrapper(form, extra_parameters=None, cross_element_width=0, gcc_
     return code
 
 
-def compile_form(a, form_compiler=None, form_compiler_parameters=None, **kwargs):
+def compile_form(a, form_compiler=None, form_compiler_parameters=None):
     """Compiles form with the specified compiler and returns a ctypes function ptr."""
 
     # Use tsfc as default form compiler
     form_compiler = "tsfc" if form_compiler is None else form_compiler
 
     form_compilers = {
-        "ffc": lambda form: ffc_compile_wrapper(form, form_compiler_parameters, **kwargs),
-        "tsfc": lambda form: tsfc_compile_wrapper(form, form_compiler_parameters, **kwargs)
+        "ffc": lambda form: ffc_compile_wrapper(form, form_compiler_parameters),
+        "tsfc": lambda form: tsfc_compile_wrapper(form, form_compiler_parameters)
     }
 
     run_form_compiler = form_compilers[form_compiler]
@@ -100,14 +100,14 @@ def compile_form(a, form_compiler=None, form_compiler_parameters=None, **kwargs)
 
     # Set dijitso into C mode
     params = {
-         'build': {
-             'cxx': 'cc',
+        'build': {
+            'cxx': 'cc',
             'cxxflags': (
                 '-O2', '-Wall', '-shared', '-fPIC', '-std=c11',
                 '-march=skylake', '-mtune=skylake', '-ftree-vectorize', '-funroll-loops'
             ),
-         },
-         'cache': {'src_postfix': '.c'},
+        },
+        'cache': {'src_postfix': '.c'},
     }
 
     # Do JIT compilation
@@ -122,18 +122,18 @@ def compile_form(a, form_compiler=None, form_compiler_parameters=None, **kwargs)
 
 # Get C MatSetValues function from PETSc because can't call
 # petsc4py.PETSc.Mat.setValues() with numba.jit(nopython=True)
-petsc = ctypes.CDLL('libpetsc.so')
+petsc = ctypes.CDLL('/usr/local/petsc-32/lib/libpetsc.so')
 MatSetValues = petsc.MatSetValues
 MatSetValues.argtypes = 7 * (ctypes.c_void_p,)
 ADD_VALUES = PETSc.InsertMode.ADD_VALUES
 del petsc
 
 
-def assemble(petsc_tensor, dofmap, form, **kwargs):
+def assemble(petsc_tensor, dofmap, form, form_compiler=None, form_compiler_parameters=None):
     assert len(form.arguments()) == 2, "Now only bilinear forms"
 
     # JIT compile UFL form into ctypes function
-    assembly_kernel = compile_form(form, **kwargs)
+    assembly_kernel = compile_form(form, form_compiler, form_compiler_parameters)
 
     # Fetch data
     tdim = dofmap.mesh.reference_cell.get_dimension()
@@ -209,17 +209,26 @@ def empty_aligned(shape, dtype, align):
     return a_casted
 
 
-def assemble_vectorized(petsc_tensor, dofmap, form, **kwargs):
+def assemble_vectorized(petsc_tensor, dofmap, form, form_compiler=None, form_compiler_parameters=None):
     assert len(form.arguments()) == 2, "Now only bilinear forms"
 
     # Size of cross-element batch
     vec_width = 4
 
+    # Use FFC by default
+    form_compiler = "ffc" if form_compiler is None else form_compiler
+
+    # Add vectorization flags to form compiler parameters
+    parameters = {} if form_compiler_parameters is None else copy(form_compiler_parameters)
+    parameters.update({
+        "cross_element_width": vec_width,
+        "enable_cross_element_gcc_ext": True
+    })
+
     # JIT compile UFL form into ctypes function
     assembly_kernel = compile_form(form,
-                                   form_compiler="ffc",
-                                   cross_element_width=vec_width,
-                                   gcc_vec_ext=True)
+                                   form_compiler=form_compiler,
+                                   form_compiler_parameters=parameters)
 
     # Fetch data
     tdim = dofmap.mesh.reference_cell.get_dimension()
