@@ -39,8 +39,6 @@ def ffc_compile_wrapper(form, extra_parameters=None):
     parameters = ffc.parameters.default_parameters()
     parameters.update({} if extra_parameters is None else extra_parameters)
 
-    use_gcc_vec_ext = parameters.get("enable_cross_element_gcc_ext", False)
-
     # Call FFC
     code_h, code_c = ffc.compiler.compile_form(form, parameters=parameters)
 
@@ -64,10 +62,6 @@ def ffc_compile_wrapper(form, extra_parameters=None):
         "#include <math.h>",
         "#include <stdalign.h>\n"
     ]
-
-    if use_gcc_vec_ext:
-        tabulate_tensor_signature = tabulate_tensor_signature.replace("double", "double4")
-        preamble.append("typedef double double4 __attribute__ ((vector_size (32)));\n")
 
     code = "\n".join(preamble + [
         tabulate_tensor_signature,
