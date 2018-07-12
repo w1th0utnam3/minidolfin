@@ -43,7 +43,7 @@ def assemble_and_solve(assemble_fun):
 
     # Run and time assembly
     t_ass = -timeit.default_timer()
-    assemble_fun(A, dofmap, a, form_compiler="ffc")
+    assemble_fun(A, dofmap, a, form_compiler_parameters={"compiler": "ffc"})
     t_ass += timeit.default_timer()
     print('Assembly time a: {}'.format(t_ass))
 
