@@ -63,7 +63,7 @@ def ffc_compile_wrapper(form, parameters=None):
         "#include <math.h>",
         "#include <stdalign.h>",
         "#include <string.h>",
-        ""
+        "",
         tabulate_tensor_signature,
         tabulate_tensor_body,
     ])
