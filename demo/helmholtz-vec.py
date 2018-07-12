@@ -27,7 +27,7 @@ u, v = ufl.TrialFunction(element), ufl.TestFunction(element)
 a = (ufl.inner(ufl.grad(u), ufl.grad(v)) - omega2*ufl.dot(u, v))*ufl.dx
 
 # Build mesh
-mesh = build_unit_square_mesh(10, 10)
+mesh = build_unit_square_mesh(2, 2)
 tdim = mesh.reference_cell.get_dimension()
 print('Number cells: {}'.format(mesh.num_entities(tdim)))
 
@@ -69,6 +69,7 @@ def assemble_and_solve(assemble_fun):
     t += timeit.default_timer()
     print('Solve linear system time: {}'.format(t))
 
+
     # Plot solution
     vertex_values = interpolate_vertex_values(dofmap, x)
 
@@ -79,11 +80,12 @@ t_ass_vec, vertex_values_vec = assemble_and_solve(assemble_vectorized)
 
 norm_ref = numpy.linalg.norm(vertex_values_ref)
 norm_vec = numpy.linalg.norm(vertex_values_vec)
+error = numpy.abs(norm_ref-norm_vec)
 
 print("")
 print("norm_ref: {:.6f}, norm_vec: {:.6f}, err: {:.6f}".format(norm_ref,
                                                                norm_vec,
-                                                               numpy.abs(norm_ref-norm_vec)))
+                                                               error))
 print("assembly t_ref: {:.2f}ms, t_vec: {:.2f}ms, speedup: {:.3f}x".format(t_ass_ref*1000,
                                                                            t_ass_vec*1000,
                                                                            t_ass_ref/t_ass_vec))
