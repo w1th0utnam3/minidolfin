@@ -14,7 +14,6 @@ import os
 import ctypes
 import ctypes.util
 import hashlib
-from copy import copy
 
 
 def tsfc_compile_wrapper(form, parameters=None):
@@ -59,18 +58,20 @@ def ffc_compile_wrapper(form, parameters=None):
     body_start = tabulate_tensor_code.index("{")
     tabulate_tensor_body = tabulate_tensor_code[body_start:].strip()
 
-    tabulate_tensor_signature = "void form_cell_integral_otherwise (double* restrict A, const double *restrict coordinate_dofs)"
+    tabulate_tensor_signature = "void form_cell_integral_otherwise (double* restrict A, const double *restrict " \
+                                "coordinate_dofs)"
 
-    return "\n".join([
+    code = "\n".join([
         "#include <math.h>",
         "#include <stdalign.h>",
         "#include <string.h>",
-        ""
+        "",
         tabulate_tensor_signature,
         tabulate_tensor_body,
     ])
 
     return code
+
 
 def jit_compile_form(a, parameters=None):
     """JIT-compile form and return ctypes function pointer"""
@@ -80,9 +81,10 @@ def jit_compile_form(a, parameters=None):
 
     # Use tsfc as default form compiler
     compiler = parameters.pop("compiler", "tsfc")
-    compile_form = {"ffc": ffc_compile_wrapper,
-                    "tsfc": tsfc_compile_wrapper
-                   }[compiler]
+    compile_form = {
+        "ffc": ffc_compile_wrapper,
+        "tsfc": tsfc_compile_wrapper
+    }[compiler]
 
     # Define generation function executed on cache miss
     def generate(form, name, signature, jit_params):
@@ -97,7 +99,7 @@ def jit_compile_form(a, parameters=None):
     name = "minidolfin_{}_{}".format(compiler, hash)
 
     # Set dijitso into C mode
-    params = {
+    jit_params = {
         'build': {
             'cxx': 'cc',
             'cxxflags': (
@@ -215,26 +217,22 @@ def empty_aligned(shape, dtype, align):
     return a_casted
 
 
-def assemble_vectorized(petsc_tensor, dofmap, form, form_compiler=None, form_compiler_parameters=None):
+def assemble_vectorized(petsc_tensor, dofmap, form, form_compiler_parameters=None):
     assert len(form.arguments()) == 2, "Now only bilinear forms"
 
     # Size of cross-element batch
     vec_width = 4
 
-    # Use FFC by default
-    form_compiler = "ffc" if form_compiler is None else form_compiler
-
     # Add vectorization flags to form compiler parameters
-    parameters = {} if form_compiler_parameters is None else copy(form_compiler_parameters)
+    parameters = form_compiler_parameters.copy() if form_compiler_parameters is not None else {}
     parameters.update({
+        "compiler": "ffc",
         "cross_element_width": vec_width,
         "enable_cross_element_gcc_ext": True
     })
 
     # JIT compile UFL form into ctypes function
-    assembly_kernel = compile_form(form,
-                                   form_compiler=form_compiler,
-                                   form_compiler_parameters=parameters)
+    assembly_kernel = jit_compile_form(form, parameters)
 
     # Fetch data
     tdim = dofmap.mesh.reference_cell.get_dimension()
@@ -277,6 +275,7 @@ def assemble_vectorized(petsc_tensor, dofmap, form, form_compiler=None, form_com
 
         # Loop over cells
         for i in range(0, cells.shape[0], vec_width):
+            # Collect vertex coordinates for each element
             for el_i in range(vec_width):
                 el_vertices = vertices[cells[i + el_i]]
                 for j in range(num_vertices_per_cell):
@@ -297,7 +296,6 @@ def assemble_vectorized(petsc_tensor, dofmap, form, form_compiler=None, form_com
 
             # "Unstride" element matrix
             _A_t[:] = numpy.transpose(_A, unstride_A)
-
 
             # Add to global tensor
             for j in range(vec_width):
