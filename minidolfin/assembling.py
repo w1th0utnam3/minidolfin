@@ -267,18 +267,27 @@ def assemble_vectorized(petsc_tensor, dofmap, form, form_compiler=None, form_com
 
         # Loop over cells
         for i in range(0, cells.shape[0], vec_width):
+            for el_i in range(vec_width):
+                el_vertices = vertices[cells[i + el_i]]
+                for j in range(num_vertices_per_cell):
+                    for k in range(gdim):
+                        _coords[j, k, el_i] = el_vertices[j, k]
+
+            """
             # Collect vertex coordinates for each element
             for j in range(vec_width):
                 _coords_t[j, :] = vertices[cells[i + j]]
-
+                
             # Make coordinates strided
             _coords[:] = numpy.transpose(_coords_t, (1, 2, 0))
+            """
 
             # Assemble cell tensor
             assembly_kernel(A_ptr, coords_ptr)
 
             # "Unstride" element matrix
             _A_t[:] = numpy.transpose(_A, unstride_A)
+
 
             # Add to global tensor
             for j in range(vec_width):
