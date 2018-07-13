@@ -1,0 +1,54 @@
+version: 2
+jobs:
+  build:
+
+    docker:
+      - image: quay.io/fenicsproject/dev-env:latest
+        user: fenics
+        environment:
+          MPLBACKEND: "agg"
+
+
+    working_directory: /home/fenics/minidolfin
+
+    steps:
+      - checkout
+
+      - run:
+          name: Install minidolfin
+          command: |
+            pip3 install --user -r requirements.txt
+            pip3 install --user .
+
+      - run:
+          name: Environment and FFC version info
+          command: |
+            echo $USER $HOME $PWD $PATH $LD_LIBRARY_PATH $CMAKE_PREFIX_PATH
+            python3 -c'import ffc, ffc.git_commit_hash; \
+                print(ffc.git_commit_hash.git_commit_hash(), ffc.backends.ufc.get_signature())'
+
+      - run:
+          name: Test demo (JIT)
+          command: |
+            cd demo
+            python3 helmholtz.py -d -n 4
+            python3 helmholtz.py -d -n 4 -c tsfc -f mode=spectral
+            python3 helmholtz.py -d -n 4 -c tsfc -f mode=vanilla
+            python3 helmholtz.py -d -n 4 -c tsfc -f mode=tensor
+            python3 helmholtz.py -d -n 4 -c ffc -r uflacs -f enable_preintegration=1
+            python3 helmholtz.py -d -n 4 -c ffc -r uflacs -f enable_preintegration=0
+            python3 helmholtz.py -d -n 4 -c ffc -r tsfc -f mode=vanilla
+            python3 helmholtz.py -d -n 4 -c ffc -r tsfc -f mode=spectral
+
+      - run:
+          name: Test demo (no JIT)
+          command: |
+            cd demo
+            python3 helmholtz.py
+            python3 helmholtz.py -c tsfc -f mode=spectral
+            python3 helmholtz.py -c tsfc -f mode=vanilla
+            python3 helmholtz.py -c tsfc -f mode=tensor
+            python3 helmholtz.py -c ffc -r uflacs -f enable_preintegration=1
+            python3 helmholtz.py -c ffc -r uflacs -f enable_preintegration=0
+            python3 helmholtz.py -c ffc -r tsfc -f mode=vanilla
+            python3 helmholtz.py -c ffc -r tsfc -f mode=spectral

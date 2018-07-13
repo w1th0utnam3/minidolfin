@@ -65,16 +65,15 @@ def ffc_compile_wrapper(form, parameters=None):
     function_name = "form_cell_integral_otherwise"
     tabulate_tensor_code = tabulate_tensor_code.replace(ffc_function_name, function_name)
 
-    code = "\n".join([
+    # Compose complete code
+    includes = [
         "#include <math.h>",
         "#include <stdalign.h>",
         "#include <string.h>",
-        "typedef double ufc_scalar_t;",
-        "",
-        tabulate_tensor_code
-    ])
+    ]
+    parts = includes + ["typedef double ufc_scalar_t;", "", tabulate_tensor_code]
 
-    return code
+    return "\n".join(parts)
 
 
 def jit_compile_form(a, parameters=None):
