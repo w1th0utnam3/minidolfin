@@ -1,3 +1,4 @@
+import ufl
 import dijitso
 from ufl.utils.sorting import canonicalize_metadata
 
@@ -139,7 +140,6 @@ del petsc
 
 def assemble(petsc_tensor, dofmap, form, form_compiler_parameters=None):
     assert len(form.arguments()) == 2, "Now only bilinear forms"
-    assert len(form.coefficients()) == 0, "Coefficients not supported"
     assert len({integral for integral in form.integrals() if integral.integral_type() != "cell"}) == 0, "Only cell " \
                                                                                                         "integrals"
 
@@ -155,14 +155,30 @@ def assemble(petsc_tensor, dofmap, form, form_compiler_parameters=None):
 
     # Prepare cell tensor temporary
     elements = tuple(arg.ufl_element() for arg in form.arguments())
-    fiat_elements = map(tsfc.fiatinterface.create_element, elements)
+    fiat_elements = (tsfc.fiatinterface.create_element(el) for el in elements)
     element_dims = tuple(fe.space_dimension() for fe in fiat_elements)
-    _A = numpy.ndarray(element_dims)
+    _A = numpy.zeros(element_dims, dtype=numpy.float64)
 
     # Prepare coordinates temporary
     num_vertices_per_cell = cells.shape[1]
     gdim = vertices.shape[1]
-    _coords = numpy.ndarray((num_vertices_per_cell, gdim), dtype=numpy.double)
+    _coords = numpy.zeros((num_vertices_per_cell, gdim), dtype=numpy.float64)
+
+    # Prepare coefficient temporaries
+    ws = []
+    for coefficient in form.coefficients():
+        w_element = coefficient.ufl_element()
+        w_dim = tsfc.fiatinterface.create_element(w_element).space_dimension()
+
+        w = numpy.zeros(w_dim, dtype=numpy.float64)
+        ws.append(w)
+
+    # Create array of pointers to coefficient arrays
+    double_ptr_t = ctypes.POINTER(ctypes.c_double)
+    _ws = (double_ptr_t * len(form.coefficients()))()
+    for i, w in enumerate(ws):
+        _ws[i] = ctypes.cast(w.ctypes.data, double_ptr_t)
+    _ws_ptr = ctypes.addressof(_ws)
 
     @numba.jit(nopython=True)
     def _assemble(assembly_kernel, cells, vertices, cell_dofs, mat, _coords, _A, _ws_ptr):
@@ -185,6 +201,6 @@ def assemble(petsc_tensor, dofmap, form, form_compiler_parameters=None):
             assert ierr == 0
 
     # Call jitted hot loop
-    _assemble(assembly_kernel, cells, vertices, cell_dofs, mat, _coords, _A, 0)
+    _assemble(assembly_kernel, cells, vertices, cell_dofs, mat, _coords, _A, _ws_ptr)
 
     petsc_tensor.assemble()
